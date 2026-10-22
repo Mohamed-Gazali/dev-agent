@@ -2,7 +2,8 @@
 
 ![tests](https://github.com/Mohamed-Gazali/dev-agent/actions/workflows/tests.yml/badge.svg)
 
-Un agent de code minimal, écrit à des fins d'apprentissage : **un modèle Gemini (via API) + 4 outils + une boucle**.
+Un agent de code minimal, écrit à des fins d'apprentissage : **un modèle de langage (via API) + 4 outils + une boucle**.
+Le fournisseur d'API est interchangeable : Google Gemini, Groq, ou toute API « compatible OpenAI ».
 Le modèle explore un dossier de projet, propose des modifications, et **rien n'est écrit sans ta confirmation**.
 
 ## Ce que fait l'agent
@@ -41,16 +42,19 @@ Appliquer cette modification ? [o/N] o
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-copy .env.example .env      # puis renseigne GEMINI_API_KEY (clé gratuite : Google AI Studio)
+copy .env.example .env      # puis renseigne la clé du fournisseur choisi (voir ci-dessous)
 ```
 
 ## Utilisation
 
 ```powershell
-python agent.py --project C:\chemin\vers\un-projet-de-test --verbose
+python agent.py --project C:\chemin\vers\un-projet-de-test --verbose                 # Gemini (défaut)
+python agent.py --project C:\chemin\vers\un-projet-de-test --provider groq --verbose  # Groq
 ```
 
-Options : `--model` (nom du modèle), `--max-steps` (étapes max par demande, 12 par défaut), `--verbose` (tokens et requêtes).
+Options : `--provider` (`gemini`, `groq`, `custom`), `--model` (nom du modèle), `--base-url` (fournisseur `custom`),
+`--max-steps` (étapes max par demande, 12 par défaut), `--max-output-chars` (taille max d'un résultat d'outil envoyé
+au modèle), `--verbose` (tokens et requêtes).
 Commandes dans l'agent : `/reset` (oublier la conversation), `/quit`.
 
 ## Tests (sans réseau, sans clé)
@@ -60,14 +64,27 @@ python -m unittest -v
 ```
 
 Les tests couvrent les outils (sorties de chemin, fichiers sensibles, confirmation, fins de ligne), la boucle d'agent
-(avec une API simulée), la gestion des erreurs et des quotas.
+avec une API simulée (formats Gemini et OpenAI), le choix du fournisseur, la gestion des erreurs et des quotas.
 
-## Quotas du niveau gratuit
+## Fournisseurs d'API
 
-Chaque modèle gratuit a ses propres limites (certains comptes : 5 requêtes/minute, 20 requêtes/jour — à vérifier sur
-https://aistudio.google.com/rate-limit). **Chaque étape de l'agent est une requête API.** Pour économiser : groupe tes
-consignes, tape `/reset` entre deux sujets, et relance avec un autre modèle quand le quota du jour est atteint
-(`--model ...`).
+| Fournisseur | Clé | Variables `.env` | Remarque |
+|---|---|---|---|
+| `gemini` (défaut) | [Google AI Studio](https://aistudio.google.com/apikey) | `GEMINI_API_KEY`, `GEMINI_MODEL` | Limites gratuites par modèle, parfois très basses (ex. 20 requêtes/jour) |
+| `groq` | [Groq Console](https://console.groq.com/keys) | `GROQ_API_KEY`, `GROQ_MODEL` | Limites gratuites exprimées en requêtes **et en tokens** (voir ci-dessous) |
+| `custom` | selon le service | `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL` | Toute API `/chat/completions` compatible OpenAI (non testée ici avec de vrais services) |
+
+Les noms de modèles et les limites changent vite : vérifie-les dans la console du fournisseur.
+Exemple `custom` : `python agent.py --project ... --provider custom --base-url https://.../v1 --model nom-du-modele`.
+
+### Quotas du niveau gratuit
+
+**Chaque étape de l'agent est une requête API.** Les limites s'appliquent par modèle (et, chez Groq, par organisation) :
+requêtes par minute, par jour, et souvent tokens par minute / par jour. Quand une limite est atteinte :
+- l'agent s'arrête avec un message clair (pas de nouvelles tentatives inutiles sur un quota journalier) ;
+- relance avec `--model` ou `--provider` différent (une nouvelle conversation, car l'historique est propre à chaque format d'API) ;
+- baisse `--max-output-chars` si le fournisseur limite les tokens par minute ;
+- tape `/reset` entre deux sujets et groupe tes consignes.
 
 ## Sécurité : ce qui est garanti, et ce qui ne l'est pas
 
@@ -86,7 +103,8 @@ Travaille toujours sur une **branche Git** pour pouvoir annuler (`git diff`, `gi
 
 ## Limites connues
 
-- Un seul fournisseur d'API pour l'instant (Gemini).
+- Pas de bascule automatique entre fournisseurs : l'historique est stocké dans le format de chaque API, il faut relancer.
+- Le comportement des appels d'outils varie selon le modèle : un petit modèle peut mal former un appel (l'erreur est alors renvoyée au modèle).
 - Avec un `--max-steps` très bas, la réponse finale peut manquer ; une modification confirmée reste appliquée.
 - `write_file` remplace le fichier en entier : sur un gros fichier, le modèle peut omettre du contenu — relis le diff.
 - Testé sur de petits projets d'exercice uniquement, pas sur de gros dépôts.
@@ -94,16 +112,18 @@ Travaille toujours sur une **branche Git** pour pouvoir annuler (`git diff`, `gi
 
 ## Structure
 
-- `llm.py` : appel HTTP à l'API, erreurs, quotas, nouvelles tentatives
+- `llm.py` : clients d'API (Gemini, compatible OpenAI) derrière une interface commune ; erreurs, quotas, nouvelles tentatives
+- `providers.py` : choix du fournisseur et réglages par défaut
 - `tools.py` : les outils et toutes les règles de sécurité
 - `agent.py` : boucle d'agent et interface en ligne de commande
 - `test_agent.py` : tests unitaires
 
 ## Feuille de route
 
-1. Plusieurs fournisseurs d'API (répartition des quotas)
-2. Outil `run_tests` avec liste blanche de commandes
-3. Branche Git + Pull Request automatiques
+1. ~~Plusieurs fournisseurs d'API~~ (v0.2)
+2. Historique neutre pour basculer de fournisseur en pleine conversation
+3. Outil `run_tests` avec liste blanche de commandes
+4. Branche Git + Pull Request automatiques
 
 ## Licence
 

@@ -59,7 +59,9 @@ def default_confirm(rel_path: str, preview: str) -> bool:
 
 
 class Workspace:
-    def __init__(self, root: str | Path, confirm: Callable[[str, str], bool] | None = None):
+    def __init__(self, root: str | Path, confirm: Callable[[str, str], bool] | None = None,
+                 max_output_chars: int = MAX_OUTPUT_CHARS):
+        self.max_output_chars = max_output_chars
         self.root = Path(root).resolve()
         if not self.root.is_dir():
             raise ToolError(f"Dossier de projet introuvable : {self.root}")
@@ -111,8 +113,8 @@ class Workspace:
             return {"error": f"Arguments invalides pour {name} : {exc}"}
         except (OSError, UnicodeError) as exc:
             return {"error": f"Erreur système : {exc}"}
-        if len(text) > MAX_OUTPUT_CHARS:
-            text = text[:MAX_OUTPUT_CHARS] + "\n[... sortie tronquée ...]"
+        if len(text) > self.max_output_chars:
+            text = text[:self.max_output_chars] + "\n[... sortie tronquée ...]"
         return {"result": text}
 
     # ---------- outils ----------
