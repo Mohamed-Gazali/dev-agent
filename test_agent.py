@@ -1,5 +1,7 @@
 """Tests de DevAgent (sans réseau). Lancer : python -m unittest -v"""
+import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -409,6 +411,122 @@ class ProviderTests(unittest.TestCase):
     def test_unknown_provider(self):
         with self.assertRaises(LLMError):
             build_client("inconnu", env={})
+
+
+# ---------- outil run_tests ----------
+class RunTestsTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        self.asked = []
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def ws(self, answer=True, **kwargs):
+        def confirm_run(command, folder):
+            self.asked.append(command)
+            return answer
+
+        return Workspace(self.root, confirm_run=confirm_run, **kwargs)
+
+    def write(self, name, body):
+        (self.root / name).write_text(body, encoding="utf-8")
+
+    PASSING = ("import unittest\n\nclass T(unittest.TestCase):\n"
+               "    def test_ok(self):\n        self.assertEqual(1 + 1, 2)\n")
+
+    def test_refusal_does_not_run_anything(self):
+        self.write("test_marker.py", "open('ran.txt', 'w').write('x')\n" + self.PASSING)
+        res = self.ws(answer=False).run("run_tests", {})
+        self.assertIn("refusé", res["error"])
+        self.assertFalse((self.root / "ran.txt").exists())
+
+    def test_confirmed_run_passes(self):
+        self.write("test_marker.py", "open('ran.txt', 'w').write('x')\n" + self.PASSING)
+        res = self.ws().run("run_tests", {"runner": "unittest"})
+        self.assertIn("Code de sortie : 0", res["result"])
+        self.assertIn("OK", res["result"])
+        self.assertTrue((self.root / "ran.txt").exists())
+        self.assertIn("-m unittest", self.asked[0])
+        self.assertTrue(self.asked[0].endswith("unittest"))
+
+    def test_failing_tests_are_reported(self):
+        self.write("test_bad.py", "import unittest\n\nclass T(unittest.TestCase):\n"
+                                  "    def test_bad(self):\n        self.assertEqual(1, 2)\n")
+        res = self.ws().run("run_tests", {})
+        self.assertIn("Code de sortie : 1", res["result"])
+        self.assertIn("FAIL", res["result"])
+
+    def test_target_selects_a_module(self):
+        self.write("test_a.py", self.PASSING)
+        self.write("test_b.py", "import unittest\n\nclass T(unittest.TestCase):\n"
+                                "    def test_b(self):\n        self.fail('ne doit pas tourner')\n")
+        res = self.ws().run("run_tests", {"target": "test_a"})
+        self.assertIn("Code de sortie : 0", res["result"])
+        self.assertIn("test_a", self.asked[0])
+
+    def test_invalid_targets_are_rejected_before_confirmation(self):
+        self.write("test_a.py", self.PASSING)
+        ws = self.ws()
+        for bad in ["-h", "../x", "a b", "x;rm", "a-b", "--version", "a/b", "$(id)", "a\\b"]:
+            self.assertIn("error", ws.run("run_tests", {"runner": "unittest", "target": bad}), bad)
+        for bad in ["-x", "../evil.py", "/etc/passwd", "C:\\x.py", "nope.py", "test_a.py::bad name"]:
+            self.assertIn("error", ws.run("run_tests", {"runner": "pytest", "target": bad}), bad)
+        self.assertIn("error", ws.run("run_tests", {"runner": "bash"}))
+        self.assertEqual(self.asked, [])
+
+    def test_timeout_stops_the_run(self):
+        self.write("test_hang.py", "import time, unittest\n\nclass T(unittest.TestCase):\n"
+                                   "    def test_hang(self):\n        time.sleep(10)\n")
+        res = self.ws(test_timeout=1).run("run_tests", {})
+        self.assertIn("Délai dépassé", res["error"])
+
+    def test_secrets_are_not_passed_and_are_redacted(self):
+        self.write("test_env.py", "import os, unittest\n\nclass T(unittest.TestCase):\n"
+                                  "    def test_env(self):\n"
+                                  "        print('VALUE=', os.environ.get('MY_API_KEY'))\n"
+                                  "        print('LEAK=supersecretvalue123')\n"
+                                  "        print('TOKEN=ghp_' + 'a' * 30)\n")
+        with mock.patch.dict(os.environ, {"MY_API_KEY": "supersecretvalue123"}):
+            res = self.ws().run("run_tests", {"target": "test_env"})
+        out = res["result"]
+        self.assertIn("VALUE= None", out)
+        self.assertNotIn("supersecretvalue123", out)
+        self.assertNotIn("ghp_aaaa", out)
+        self.assertIn("[SECRET]", out)
+
+    def test_long_output_keeps_the_end(self):
+        self.write("test_long.py", "import unittest\n\nclass T(unittest.TestCase):\n"
+                                   "    def test_long(self):\n"
+                                   "        print('ligne\\n' * 5000)\n"
+                                   "        self.fail('FIN-IMPORTANTE')\n")
+        res = self.ws(max_output_chars=1000).run("run_tests", {})
+        self.assertIn("FIN-IMPORTANTE", res["result"])
+        self.assertIn("début tronqué", res["result"])
+        self.assertLess(len(res["result"]), 1200)
+
+    def test_run_limit_per_session(self):
+        self.write("test_a.py", self.PASSING)
+        ws = self.ws()
+        ws.test_runs = 10
+        self.assertIn("Limite", ws.run("run_tests", {})["error"])
+
+    def test_missing_python_is_explained(self):
+        res = self.ws(python_exe=str(self.root / "pas-de-python.exe")).run("run_tests", {})
+        self.assertIn("Interpréteur", res["error"])
+
+    @unittest.skipUnless(importlib.util.find_spec("pytest"), "pytest non installé")
+    def test_pytest_runs_with_a_node_id(self):
+        self.write("test_p.py", "def test_ok():\n    assert 1 + 1 == 2\n\ndef test_ko():\n    assert False\n")
+        res = self.ws().run("run_tests", {"runner": "pytest", "target": "test_p.py::test_ok"})
+        self.assertIn("Code de sortie : 0", res["result"])
+
+    def test_tool_is_declared_for_both_api_formats(self):
+        from tools import TOOL_DECLARATIONS
+        decl = next(d for d in TOOL_DECLARATIONS if d["name"] == "run_tests")
+        self.assertEqual(decl["parameters"]["properties"]["runner"]["enum"], ["unittest", "pytest"])
+        self.assertEqual(OpenAICompatClient._tools([decl])[0]["function"]["name"], "run_tests")
 
 
 if __name__ == "__main__":

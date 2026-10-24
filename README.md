@@ -14,8 +14,9 @@ Le modèle explore un dossier de projet, propose des modifications, et **rien n'
 | `read_file` | Lire un fichier | Refuse `.env`, clés, bases de données, binaires, tout chemin hors-projet |
 | `search_text` | Chercher du texte | Mêmes règles |
 | `write_file` | Créer / modifier un fichier | **Diff + confirmation obligatoire** ; jamais `.git`, ni secrets, ni hors-projet |
+| `run_tests` | Lancer `unittest` ou `pytest` | **Confirmation à chaque lancement** ; commande fixe sans shell ; cible validée ; délai max ; clés d'API retirées de l'environnement ; sortie expurgée |
 
-L'agent **ne peut pas** exécuter de commandes (ni tests, ni `pip`).
+L'agent **ne peut exécuter aucune autre commande** (ni `pip`, ni scripts, ni shell).
 
 ## Exemple de session
 
@@ -52,8 +53,13 @@ python agent.py --project C:\chemin\vers\un-projet-de-test --verbose            
 python agent.py --project C:\chemin\vers\un-projet-de-test --provider groq --verbose  # Groq
 ```
 
+Pour que l'agent puisse corriger puis vérifier, il lance les tests avec `run_tests` (après ta confirmation) :
+il lit l'échec, corrige, relance, trois cycles au maximum. Si les tests ont besoin des dépendances du projet,
+indique le Python de son environnement virtuel : `--python C:\chemin\vers\projet\.venv\Scripts\python.exe`.
+
 Options : `--provider` (`gemini`, `groq`, `custom`), `--model` (nom du modèle), `--base-url` (fournisseur `custom`),
-`--max-steps` (étapes max par demande, 12 par défaut), `--max-output-chars` (taille max d'un résultat d'outil envoyé
+`--python` (Python des tests), `--test-timeout` (secondes, 60 par défaut),
+`--max-steps` (étapes max par demande, 12 par défaut ; 15 conseillé avec les tests), `--max-output-chars` (taille max d'un résultat d'outil envoyé
 au modèle), `--verbose` (tokens et requêtes).
 Commandes dans l'agent : `/reset` (oublier la conversation), `/quit`.
 
@@ -91,6 +97,13 @@ requêtes par minute, par jour, et souvent tokens par minute / par jour. Quand u
 **Garanti par le code** (testé) : pas d'accès hors du dossier du projet, pas de lecture ni d'écriture des fichiers
 sensibles, pas d'écriture dans `.git`, confirmation humaine avant toute écriture.
 
+**Lancer des tests = exécuter le code du projet sur ta machine**, y compris celui que l'agent vient d'écrire.
+C'est pourquoi chaque lancement demande ta confirmation et affiche la commande exacte. Aucune isolation (sandbox)
+n'est fournie : ne lance `run_tests` que sur un projet dont tu as relu le code, et relis chaque diff avant de tester.
+Les variables d'environnement qui ressemblent à des secrets (`*KEY*`, `*TOKEN*`, `*SECRET*`, ...) ne sont pas
+transmises aux tests, et leurs valeurs ainsi que les formats de clés courants sont masqués dans la sortie renvoyée
+au modèle. Un test qui lit lui-même un fichier `.env` du projet n'est en revanche pas empêché de le faire.
+
 **Non garanti** :
 - Le contenu des fichiers lus est **envoyé à l'API de Google**. Sur le niveau gratuit, Google peut utiliser les requêtes pour
   améliorer ses produits : ne l'utilise pas sur du code confidentiel ni sur des données personnelles.
@@ -108,6 +121,7 @@ Travaille toujours sur une **branche Git** pour pouvoir annuler (`git diff`, `gi
 - Avec un `--max-steps` très bas, la réponse finale peut manquer ; une modification confirmée reste appliquée.
 - `write_file` remplace le fichier en entier : sur un gros fichier, le modèle peut omettre du contenu — relis le diff.
 - Testé sur de petits projets d'exercice uniquement, pas sur de gros dépôts.
+- Les tests tournent sans sandbox : un test malveillant pourrait lire des fichiers de ta machine (d'où la confirmation).
 - Les noms de modèles changent vite : ajuste `GEMINI_MODEL` dans `.env` si besoin.
 
 ## Structure
@@ -122,8 +136,9 @@ Travaille toujours sur une **branche Git** pour pouvoir annuler (`git diff`, `gi
 
 1. ~~Plusieurs fournisseurs d'API~~ (v0.2)
 2. Historique neutre pour basculer de fournisseur en pleine conversation
-3. Outil `run_tests` avec liste blanche de commandes
-4. Branche Git + Pull Request automatiques
+3. ~~Outil `run_tests` avec liste blanche de commandes~~ (v0.3)
+4. Isolation des tests (conteneur ou environnement jetable)
+5. Branche Git + Pull Request automatiques
 
 ## Licence
 
